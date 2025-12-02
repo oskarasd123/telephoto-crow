@@ -3,6 +3,18 @@ from torchvision import datasets, transforms
 import os
 import numpy as np
 from numpy.random import RandomState, MT19937, SeedSequence
+from PIL import Image
+import warnings
+
+warnings.filterwarnings(
+    "ignore", 
+    message="Palette images with Transparency expressed in bytes should be converted to RGBA images", 
+    category=UserWarning,
+    module='PIL.Image'
+)
+
+
+
 
 # 1. Define image transformations (resize, convert to tensor, normalize)
 data_transform = transforms.Compose([
@@ -57,11 +69,12 @@ class MergedImageFolder(datasets.DatasetFolder):
         self.data_pairs = self.data_pairs[(values >= use_fraction[0]) & (values < use_fraction[1])]
         self.classes = list(classes)
         self.classes.sort()
-        self.class_to_idx = {image_class : i for i, image_class in enumerate(self.classes, start=1)}
-        self.class_to_idx[""] = 0 # no class
+        self.classes.insert(0, "")
+        self.class_to_idx = {image_class : i for i, image_class in enumerate(self.classes)}
+        #self.class_to_idx[""] = 0 # no class
 
-        self.loader = datasets.folder.default_loader
-        
+
+    
 
     def __len__(self):
         return len(self.data_pairs)
@@ -69,10 +82,10 @@ class MergedImageFolder(datasets.DatasetFolder):
     def __getitem__(self, idx):
         # returns the image and the class index
         path, image_class = self.data_pairs[idx]
-        sample = self.loader(path)
+        image = Image.open(path).convert("RGB")#.convert("RGB")
         if self.transform is not None:
-            sample = self.transform(sample)
-        return sample, self.class_to_idx[image_class]
+            image = self.transform(image)
+        return image, self.class_to_idx[image_class]
 
 if __name__ == "__main__":
     # 4. Initialize the combined dataset

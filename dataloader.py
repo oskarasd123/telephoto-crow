@@ -163,7 +163,7 @@ class MergedImageFolder(datasets.DatasetFolder):
                 image_dirs = [obj for obj in os.listdir(sub_path) if os.path.isdir(os.path.join(sub_path, obj))]
                 for dir in image_dirs:
                     base_dir = os.path.join(sub_path, dir)
-                    image_class = class_cleanup_dict.get(dir, "unknown")
+                    image_class = class_cleanup_dict.get(dir, dir)
                     classes.add(image_class)
                     for image_name in os.listdir(base_dir):
                         image_path = os.path.join(base_dir, image_name)

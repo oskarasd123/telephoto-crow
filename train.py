@@ -6,7 +6,7 @@ import numpy as np
 from torchvision import transforms
 
 batch_size = 32
-epochs = 100
+epochs = 200 # training limit. if early stopping hasnt been reached
 lr = 2e-3
 device = "cuda"
 
@@ -96,42 +96,49 @@ classification_head = nn.Linear(256, num_classes)
 loss_fn = nn.CrossEntropyLoss()
 optimizer = optim.AdamW(model.parameters(), lr)
 
+accuracy = []
 
-for epoch in range(epochs):
-    train_loss = 0
-    for images, classes in train_dataloader:
-        images = images.to(device, non_blocking=True)
-        classes = classes.to(device, non_blocking=True)
-        logits = model(images)
-        probs = torch.softmax(logits, 1)
-        B, C, W, H = probs.shape
-        mid = W//2, H//2
-        #print(W, H)
-        output = probs[:, :, *mid]
-        loss = loss_fn(output, classes)
-        train_loss += loss.item()
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
-    test_loss = 0
-    correct_predictions = 0
-    with torch.no_grad():
-        for images, classes in test_dataloader:
+try:
+    for epoch in range(epochs):
+        train_loss = 0
+        for images, classes in train_dataloader:
             images = images.to(device, non_blocking=True)
             classes = classes.to(device, non_blocking=True)
             logits = model(images)
             probs = torch.softmax(logits, 1)
             B, C, W, H = probs.shape
             mid = W//2, H//2
+            #print(W, H)
             output = probs[:, :, *mid]
             loss = loss_fn(output, classes)
-            test_loss += loss.item()
-            correct_predictions += (output.argmax(1) == classes).float().sum()
-    test_loss /= len(test_dataloader)
-    train_loss /= len(train_dataloader)
-    correct_predictions /= len(test_dataloader)
-    print(f"epoch: {epoch+1}/{epochs} \ttest loss: {test_loss:.3f} \ttrain loss: {train_loss:.3f} \taccuracy: {correct_predictions:.3f}")
-
+            train_loss += loss.item()
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+        test_loss = 0
+        correct_predictions = 0
+        with torch.no_grad():
+            for images, classes in test_dataloader:
+                images = images.to(device, non_blocking=True)
+                classes = classes.to(device, non_blocking=True)
+                logits = model(images)
+                probs = torch.softmax(logits, 1)
+                B, C, W, H = probs.shape
+                mid = W//2, H//2
+                output = probs[:, :, *mid]
+                loss = loss_fn(output, classes)
+                test_loss += loss.item()
+                correct_predictions += (output.argmax(1) == classes).float().sum()
+        test_loss /= len(test_dataloader)
+        train_loss /= len(train_dataloader)
+        correct_predictions /= len(test_dataset)
+        accuracy.append(correct_predictions)
+        # early stopping
+        if accuracy.index(max(accuracy)) < len(accuracy) - 10:
+            break # stop training if accuray hasn't increased in the last 10 epochs
+        print(f"epoch: {epoch+1}/{epochs} \ttest loss: {test_loss:.3f} \ttrain loss: {train_loss:.3f} \taccuracy: {correct_predictions:.3f}")
+except KeyboardInterrupt:
+    pass
 torch.save(model.state_dict(), "model.pt")
-
+print("model saved")
 

@@ -4,11 +4,16 @@ import torch.nn.functional as F
 from dataloader import MergedImageFolder
 import numpy as np
 from torchvision import transforms
+import torch.amp as amp
+import time
+
 
 batch_size = 32
-epochs = 200 # training limit. if early stopping hasnt been reached
-lr = 2e-3
+epochs = 500 # training limit. if early stopping hasnt been reached
+lr = 1e-3
+early_stopping_patience = 10
 device = "cuda"
+
 
 
 class ConvBlock(nn.Module):
@@ -58,7 +63,7 @@ class Detector(nn.Module):
             ConvBlockDownSample(64, 128, 2),
             ConvBlockDownSample(128, 192, 2),
             ConvBlockDownSample(192, 256, 2),
-            ConvBlock(256, 256, 2, 1),
+            ConvBlock(256, out_channels, 2, 1),
         )
     
     def forward(self, x : Tensor) -> Tensor:
@@ -69,14 +74,17 @@ class Detector(nn.Module):
 data_transform = transforms.Compose([
     transforms.Resize(128),              # Resize smaller dimension to 256
     transforms.CenterCrop(96),          # Crop to 224x224 (standard input size)
-    transforms.Pad(16, padding_mode="reflect"),
+    transforms.Pad(32, padding_mode="reflect"),
     transforms.ToTensor(),               # Convert to PyTorch Tensor
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # Standard ImageNet normalization
 ])
 
-
-train_dataset = MergedImageFolder("./data", data_transform, 0.8)
-test_dataset = MergedImageFolder("./data", data_transform, (0.8, 1))
+train_datasets = [MergedImageFolder("./data1", data_transform, 0.8),
+                  MergedImageFolder("./data2/CUB_200_2011/images/", data_transform, 0.8, dataset_nr=2),
+                  ]
+test_datasets = [MergedImageFolder("./data1", data_transform, (0.8, 1)),
+                 MergedImageFolder("./data2/CUB_200_2011/images/", data_transform, (0.8, 1), dataset_nr=2),
+                 ]
 
 def collate_fn(examples : list):
     images = []
@@ -86,59 +94,101 @@ def collate_fn(examples : list):
         classes.append(image_class)
     return torch.stack(images), torch.tensor(np.array(classes, dtype=int))
 
-train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, collate_fn=collate_fn)
-test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=True, num_workers=4, collate_fn=collate_fn)
-num_classes = len(train_dataset.classes)
+printed = []
+def printonce(*args):
+    text = " ".join(map(str, args))
+    if text not in printed:
+        print(text)
+        printed.append(text)
 
-model = Detector(3, num_classes).to(device)
-classification_head = nn.Linear(256, num_classes)
+
+total_test_size = sum(map(len, test_datasets))
+# calculate batch size for each dataset in order to have equal total batch = batch_size
+train_dataset_sizes = list(map(len, train_datasets))
+total_train_size = sum(train_dataset_sizes)
+num_batches = -(-total_train_size//batch_size)
+batch_sizes = [round(len(train_dataset)/num_batches) for train_dataset in train_datasets]
+print(f"dataset sizes: {train_dataset_sizes}")
+print(f"batch sizes: {batch_sizes}")
+print(f"batch counts: {[-(-dataset_size//batch_size) for batch_size, dataset_size in zip(batch_sizes, train_dataset_sizes)]}")
+print(f"total batch size: {sum(batch_sizes)}")
+train_dataloaders = [torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, collate_fn=collate_fn) for train_dataset, batch_size in zip(train_datasets, batch_sizes)]
+test_dataloaders = [torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=True, num_workers=4, collate_fn=collate_fn) for test_dataset in test_datasets]
+
+
+
+model = Detector(3, 256).to(device).bfloat16()
+classification_heads = [ConvBlock(256, len(train_dataset.classes), 1, 1).to(device) for train_dataset in train_datasets]
 
 loss_fn = nn.CrossEntropyLoss()
 optimizer = optim.AdamW(model.parameters(), lr)
+head_optimizers = [optim.AdamW(head.parameters(), lr) for head in classification_heads]
 
-accuracy = []
-
+accuracy_history = []
+start_time = time.time()
 try:
     for epoch in range(epochs):
         train_loss = 0
-        for images, classes in train_dataloader:
-            images = images.to(device, non_blocking=True)
-            classes = classes.to(device, non_blocking=True)
-            logits = model(images)
-            probs = torch.softmax(logits, 1)
-            B, C, W, H = probs.shape
-            mid = W//2, H//2
-            #print(W, H)
-            output = probs[:, :, *mid]
-            loss = loss_fn(output, classes)
-            train_loss += loss.item()
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-        test_loss = 0
-        correct_predictions = 0
-        with torch.no_grad():
-            for images, classes in test_dataloader:
-                images = images.to(device, non_blocking=True)
+        for dataset_batches in zip(*train_dataloaders):
+            for (images, classes), head, head_optim in zip(dataset_batches, classification_heads, head_optimizers):
+                images = images.to(device, torch.bfloat16, non_blocking=True)
                 classes = classes.to(device, non_blocking=True)
-                logits = model(images)
+                #with torch.amp.autocast(device, torch.bfloat16):
+                features = model(images).float()
+                logits = head(features)
                 probs = torch.softmax(logits, 1)
                 B, C, W, H = probs.shape
+                printonce(W, H)
                 mid = W//2, H//2
                 output = probs[:, :, *mid]
                 loss = loss_fn(output, classes)
-                test_loss += loss.item()
-                correct_predictions += (output.argmax(1) == classes).float().sum()
-        test_loss /= len(test_dataloader)
-        train_loss /= len(train_dataloader)
-        correct_predictions /= len(test_dataset)
-        accuracy.append(correct_predictions)
+                train_loss += loss.item()
+                loss.backward()
+                head_optim.step()
+                head_optim.zero_grad()
+            optimizer.step()
+            optimizer.zero_grad()
+        test_loss = 0
+        correct_predictions = [0 for i in range(len(test_datasets))]
+        total_predictions = [0 for i in range(len(test_datasets))]
+        with torch.no_grad():
+            for i, (test_dataloader, head) in enumerate(zip(test_dataloaders, classification_heads)):
+                for images, classes in test_dataloader:
+                    images = images.to(device, torch.bfloat16, non_blocking=True)
+                    classes = classes.to(device, non_blocking=True)
+                    #with torch.amp.autocast(device, torch.bfloat16):
+                    features = model(images).float()
+                    logits = head(features)
+                    probs = torch.softmax(logits, 1)
+                    B, C, W, H = probs.shape
+                    mid = W//2, H//2
+                    output = probs[:, :, *mid]
+                    loss = loss_fn(output, classes)
+                    test_loss += loss.item()
+                    correct_predictions[i] += (output.argmax(1) == classes).float().sum().item()
+                    total_predictions[i] += B
+        test_loss /= sum(total_predictions)
+        train_loss /= total_train_size
+        correct_predictions = [correct/total for correct, total in zip(correct_predictions, total_predictions)]
+        accuracy = np.mean(correct_predictions)
+        accuracy_history.append(accuracy)
         # early stopping
-        if accuracy.index(max(accuracy)) < len(accuracy) - 10:
+        print(f"epoch: {epoch+1}/{epochs} \ttest loss: {test_loss:.3f} \ttrain loss: {train_loss:.3f}" \
+              f" \taccuracy: {[f'{correct_prediction:.3f}' for correct_prediction in correct_predictions]}{'\'' if accuracy_history[-1] == max(accuracy_history) else ' '}\tmean epoch time: {(time.time() - start_time)/(epoch+1):.2f}")
+        if accuracy_history.index(max(accuracy_history)) < len(accuracy_history) - early_stopping_patience:
+            print("early stopping")
             break # stop training if accuray hasn't increased in the last 10 epochs
-        print(f"epoch: {epoch+1}/{epochs} \ttest loss: {test_loss:.3f} \ttrain loss: {train_loss:.3f} \taccuracy: {correct_predictions:.3f}")
 except KeyboardInterrupt:
-    pass
+    save_model = input("save model(Y/n): ").lower() != "n"
+    if save_model:
+        pass
+    else:
+        exit()
+state_dict = {
+    "backbone" : model.state_dict(),
+    "heads" : [head.state_dict() for head in classification_heads],
+    "backbone_optim" : optimizer.state_dict(),
+}
 torch.save(model.state_dict(), "model.pt")
 print("model saved")
 

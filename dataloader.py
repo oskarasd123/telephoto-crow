@@ -15,8 +15,6 @@ warnings.filterwarnings(
 
 
 
-
-# 1. Define image transformations (resize, convert to tensor, normalize)
 data_transform = transforms.Compose([
     transforms.Resize(256),              # Resize smaller dimension to 256
     transforms.CenterCrop(224),          # Crop to 224x224 (standard input size)
@@ -145,42 +143,39 @@ class_cleanup_dict = {
 "pegion-gullimeot":                                                                                                                   "pegion-gullimeot",
 }
 
-
-# 2. Define the root folder (where 9/ and 10/ are located)
-# Assuming 'data_root' points to the directory containing '9' and '10'
-data_root = './data/'
-
-# 3. Create a custom dataset that iterates through your top-level folders (9 and 10)
+def read_folder(path : str) -> list[str]:
+    image_paths = []
+    for name in os.listdir(path):
+        item_path = os.path.join(path, name)
+        if os.path.isdir(item_path):
+            image_paths += read_folder(item_path)
+        else:
+            image_paths.append(item_path)
+    return image_paths
 class MergedImageFolder(datasets.DatasetFolder):
-    def __init__(self, root, transform=None, use_fraction : float | tuple[float, float] = 1):
+    def __init__(self, root, transform=None, use_fraction : float | tuple[float, float] = 1, dataset_nr = 1):
         self.data_pairs : list[tuple[str, str]] = [] # tuples of (path, class)
         self.transform = transform
         classes = set()
-        # Look for all numbered directories (like 9 and 10)
+        
         for sub_dir in os.listdir(root):
-            sub_path = os.path.join(root, sub_dir, 'raw') # Go into the 'raw' folder
+            sub_path = os.path.join(root, sub_dir, "raw") if dataset_nr == 1 else os.path.join(root, sub_dir)
             if os.path.isdir(sub_path):
-                image_dirs = [obj for obj in os.listdir(sub_path) if os.path.isdir(os.path.join(sub_path, obj))]
-                for dir in image_dirs:
-                    base_dir = os.path.join(sub_path, dir)
-                    image_class = class_cleanup_dict.get(dir, dir)
+                if dataset_nr == 1:
+                    image_dirs = [obj for obj in os.listdir(sub_path) if os.path.isdir(os.path.join(sub_path, obj))]
+                    for dir in image_dirs:
+                        base_dir = os.path.join(sub_path, dir)
+                        image_class = class_cleanup_dict.get(dir, dir)
+                        classes.add(image_class)
+                        image_paths = read_folder(base_dir)
+                        [self.data_pairs.append((path, image_class)) for path in image_paths if path.endswith((".jpg", ".png", "jpeg"))]
+                else:
+                    image_class = class_cleanup_dict.get(sub_dir, sub_dir)
                     classes.add(image_class)
-                    for image_name in os.listdir(base_dir):
-                        image_path = os.path.join(base_dir, image_name)
-                        if not os.path.isdir(image_path):
-                            if image_path.endswith((".jpg", ".png", ".jpeg")):
-                                self.data_pairs.append((image_path, image_class))
-                            else:
-                                pass #print(f"unused file: {image_path}")
-                        else:
-                            dir_path = image_path
-                            for image_name in os.listdir(dir_path):
-                                image_path = os.path.join(dir_path, image_name)
-                                if not os.path.isdir(image_path):
-                                    if image_path.endswith((".jpg", ".png", ".jpeg")):
-                                        self.data_pairs.append((image_path, image_class))
-                                    else:
-                                        pass #print(f"unused file: {image_path}")
+                    image_paths = read_folder(sub_path)
+                    [self.data_pairs.append((path, image_class)) for path in image_paths if path.endswith((".jpg", ".png", "jpeg"))]
+
+
         if isinstance(use_fraction, (float, int)):
             use_fraction = (0, use_fraction)
         values = np.arange(len(self.data_pairs))/len(self.data_pairs)
@@ -209,16 +204,13 @@ class MergedImageFolder(datasets.DatasetFolder):
         return image, self.class_to_idx[image_class]
 
 if __name__ == "__main__":
-    # 4. Initialize the combined dataset
-    bird_dataset = MergedImageFolder(root=data_root, transform=data_transform, use_fraction=(0.1, 0.8))
+    bird_dataset1 = MergedImageFolder(root="data1", transform=data_transform, use_fraction=(0.1, 0.8), dataset_nr=1)
+    bird_dataset2 = MergedImageFolder(root="data2/CUB_200_2011/images/", transform=data_transform, use_fraction=(0.1, 0.8), dataset_nr=2)
 
-    
-    print(f"Total images loaded: {len(bird_dataset)}")
-    print(f"Number of species detected: {len(bird_dataset.classes)}")
     if False:
         pres = []
         posts = []
-        for i, clas in enumerate(bird_dataset.classes):
+        for i, clas in enumerate(bird_dataset1.classes):
             clas : str
             pre = f"\"{clas}\":"
             post = clas.lower().replace("_macaulay_library_and_ebirdmacaulay", "").replace("_media_search_", "") \
@@ -230,13 +222,18 @@ if __name__ == "__main__":
         max_length = max(map(len, pres))
         for pre, post in zip(pres, posts):
             print(pre + (" " * (max_length - len(pre))) + post)
+    
         
-        
-
-    # 5. Create a DataLoader for batch processing
-    data_loader = torch.utils.data.DataLoader(bird_dataset, batch_size=32, shuffle=True, num_workers=4)
-
     # try load all items
-    for batch in data_loader:
-        pass
+    for i, dataset in enumerate([bird_dataset1, bird_dataset2]):
+        class_counts = [0 for i in range(len(dataset.classes))]
+        for image, class_id in dataset:
+            class_counts[class_id] += 1
+        print(f"Dataset {i}:")
+        class_average = float(np.mean(class_counts))
+        class_spread = float(np.std(class_counts))
+        print(f"  number of entries: {len(dataset)}")
+        print(f"  number of classes: {len(dataset.classes)}")
+        print(f"  class count average, spread: {class_average:.3f} {class_spread:.3f}")
+
 

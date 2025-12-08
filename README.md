@@ -8,7 +8,7 @@ this repository contains the model training and inference code for my crow detec
 
 # Getting started
 
-make sure you have all libraries in requirements.txt
+Make sure you have all libraries in requirements.txt
 
 
 download datasets:
@@ -22,3 +22,13 @@ unzip them:
 `unzip 142-birds-species-object-detection-v1.zip -d data1/`
 
 `unzip cub2002011.zip -d data2/`
+
+try to load the dataset(optional): `python3 dataloader.py`
+
+## Training
+
+Pretrain a model: `python3 train.py`
+
+Train the pretrained model on my data with: `python3 post_train.pt`
+
+make graphs with `python3 graphs_and_statistics.py`

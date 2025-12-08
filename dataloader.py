@@ -204,8 +204,9 @@ class MergedImageFolder(datasets.DatasetFolder):
         return image, self.class_to_idx[image_class]
 
 if __name__ == "__main__":
-    bird_dataset1 = MergedImageFolder(root="data1", transform=data_transform, use_fraction=(0.1, 0.8), dataset_nr=1)
-    bird_dataset2 = MergedImageFolder(root="data2/CUB_200_2011/images/", transform=data_transform, use_fraction=(0.1, 0.8), dataset_nr=2)
+    bird_dataset1 = MergedImageFolder("data1", transform=data_transform, use_fraction=1, dataset_nr=1)
+    bird_dataset2 = MergedImageFolder("data2/CUB_200_2011/images/", transform=data_transform, use_fraction=1, dataset_nr=2)
+    bird_dataset3 = MergedImageFolder("raw_data/data/", transform=data_transform, use_fraction=1, dataset_nr=2)
 
     if False:
         pres = []
@@ -223,11 +224,12 @@ if __name__ == "__main__":
         for pre, post in zip(pres, posts):
             print(pre + (" " * (max_length - len(pre))) + post)
     
+    bird_datasets = [bird_dataset1, bird_dataset2, bird_dataset3]
         
-    # try load all items
-    for i, dataset in enumerate([bird_dataset1, bird_dataset2]):
-        class_counts = [0 for i in range(len(dataset.classes))]
-        for image, class_id in dataset:
+    for i, dataset in enumerate(bird_datasets):
+        class_counts = [0 for _ in range(len(dataset.classes))]
+        for image_path, class_name in dataset.data_pairs:
+            class_id = dataset.class_to_idx[class_name]
             class_counts[class_id] += 1
         print(f"Dataset {i}:")
         class_average = float(np.mean(class_counts))
@@ -236,4 +238,10 @@ if __name__ == "__main__":
         print(f"  number of classes: {len(dataset.classes)}")
         print(f"  class count average, spread: {class_average:.3f} {class_spread:.3f}")
 
+    try_load = input("try load all items(y/N): ").strip().lower() == "y"
+    # try load all items
+    if try_load:
+        for dataset in bird_datasets:
+            for image, class_id in dataset:
+                pass
 

@@ -1,4 +1,9 @@
 __pycache__
 *.zip
-data*
+data1
+data2
 *.pt
+logs
+logs_with_extra
+pretrain_logs
+graphs

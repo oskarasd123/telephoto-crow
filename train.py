@@ -1,19 +1,26 @@
+import os
 import torch
 from torch import nn, optim, Tensor
 import torch.nn.functional as F
 from dataloader import MergedImageFolder
 import numpy as np
 from torchvision import transforms
-import torch.amp as amp
 import time
+import datetime
+from torch.utils.tensorboard import SummaryWriter
+
 
 
 batch_size = 32
-epochs = 500 # training limit. if early stopping hasnt been reached
+epochs = 1000 # training limit. if early stopping hasnt been reached
 lr = 1e-3
+betas = (0.9, 0.999)
 early_stopping_patience = 10
 device = "cuda"
-
+load_checkpoint = False
+save_path = "model.pt"
+log_dir = "pretrain_logs/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+log_writer = SummaryWriter(log_dir)
 
 
 class ConvBlock(nn.Module):
@@ -24,9 +31,9 @@ class ConvBlock(nn.Module):
         self.mid_ratio = mid_ratio
         self.mid_channels = int((in_channels + out_channels) * mid_ratio / 2)
         assert kernel_size % 2 == 1, f"kernel size must be odd. got {kernel_size}"
-        self.up_conv = nn.Conv2d(in_channels, self.mid_channels, kernel_size, 1, (kernel_size-1)//2)
-        self.down_conv = nn.Conv2d(self.mid_channels, out_channels, 1, 1, 0)
-        self.residual_conv = nn.Conv2d(in_channels, out_channels, 1, 1, 0)
+        self.up_conv = nn.Conv2d(in_channels, self.mid_channels, kernel_size, 1, (kernel_size-1)//2, padding_mode="reflect")
+        self.down_conv = nn.Conv2d(self.mid_channels, out_channels, 1, 1, 0, padding_mode="reflect")
+        self.residual_conv = nn.Conv2d(in_channels, out_channels, 1, 1, 0, padding_mode="reflect")
         self.output_norm = nn.GroupNorm(out_channels, out_channels)
     
     def forward(self, x):
@@ -42,9 +49,9 @@ class ConvBlockDownSample(nn.Module):
         self.mid_ratio = mid_ratio
         self.mid_channels = int((in_channels + out_channels) * mid_ratio / 2)
         assert kernel_size%2==1, f"kernel size must be odd. got {kernel_size}"
-        self.up_conv = nn.Conv2d(in_channels, self.mid_channels, kernel_size, 1, (kernel_size-1)//2)
-        self.down_conv = nn.Conv2d(self.mid_channels, out_channels, 4, 2, 1) # down samples by 2x
-        self.residual_conv = nn.Conv2d(in_channels, out_channels, 2, 2, 0) # also down samples by 2x, but uses 2x2 kernel
+        self.up_conv = nn.Conv2d(in_channels, self.mid_channels, kernel_size, 1, (kernel_size-1)//2, padding_mode="reflect")
+        self.down_conv = nn.Conv2d(self.mid_channels, out_channels, 4, 2, 1, padding_mode="reflect") # down samples by 2x
+        self.residual_conv = nn.Conv2d(in_channels, out_channels, 2, 2, 0, padding_mode="reflect") # also down samples by 2x, but uses 2x2 kernel
         self.output_norm = nn.GroupNorm(out_channels, out_channels)
     
     def forward(self, x):
@@ -59,8 +66,10 @@ class Detector(nn.Module):
 
         self.layers = nn.Sequential(
             ConvBlockDownSample(in_channels, 32, 2),
-            ConvBlockDownSample(32, 64, 2),
-            ConvBlockDownSample(64, 128, 2),
+            ConvBlock(32, 48, 2),
+            ConvBlockDownSample(48, 64, 2),
+            ConvBlock(64, 96, 2),
+            ConvBlockDownSample(96, 128, 2),
             ConvBlockDownSample(128, 192, 2),
             ConvBlockDownSample(192, 256, 2),
             ConvBlock(256, out_channels, 2, 1),
@@ -71,20 +80,31 @@ class Detector(nn.Module):
 
 
 
-data_transform = transforms.Compose([
-    transforms.Resize(128),              # Resize smaller dimension to 256
-    transforms.CenterCrop(96),          # Crop to 224x224 (standard input size)
+train_transform = transforms.Compose([
+    transforms.Resize(128),
+    transforms.RandomCrop(96),
     transforms.Pad(32, padding_mode="reflect"),
     transforms.ToTensor(),               # Convert to PyTorch Tensor
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # Standard ImageNet normalization
 ])
 
-train_datasets = [MergedImageFolder("./data1", data_transform, 0.8),
-                  MergedImageFolder("./data2/CUB_200_2011/images/", data_transform, 0.8, dataset_nr=2),
-                  ]
-test_datasets = [MergedImageFolder("./data1", data_transform, (0.8, 1)),
-                 MergedImageFolder("./data2/CUB_200_2011/images/", data_transform, (0.8, 1), dataset_nr=2),
-                 ]
+test_transform = transforms.Compose([
+    transforms.Resize(128),
+    transforms.CenterCrop(96),
+    transforms.Pad(32, padding_mode="reflect"),
+    transforms.ToTensor(),               # Convert to PyTorch Tensor
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) # Standard ImageNet normalization
+])
+
+
+train_datasets = [
+                MergedImageFolder("./data2/CUB_200_2011/images/", train_transform, 0.8, dataset_nr=2),
+                #MergedImageFolder("./data1", data_transform, 0.8),
+                ]
+test_datasets = [
+                MergedImageFolder("./data2/CUB_200_2011/images/", test_transform, (0.8, 1), dataset_nr=2),
+                #MergedImageFolder("./data1", data_transform, (0.8, 1)),
+                ]
 
 def collate_fn(examples : list):
     images = []
@@ -110,8 +130,8 @@ num_batches = -(-total_train_size//batch_size)
 batch_sizes = [round(len(train_dataset)/num_batches) for train_dataset in train_datasets]
 print(f"dataset sizes: {train_dataset_sizes}")
 print(f"batch sizes: {batch_sizes}")
-print(f"batch counts: {[-(-dataset_size//batch_size) for batch_size, dataset_size in zip(batch_sizes, train_dataset_sizes)]}")
 print(f"total batch size: {sum(batch_sizes)}")
+print(f"batch counts: {[-(-dataset_size//batch_size) for batch_size, dataset_size in zip(batch_sizes, train_dataset_sizes)]}")
 train_dataloaders = [torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, collate_fn=collate_fn) for train_dataset, batch_size in zip(train_datasets, batch_sizes)]
 test_dataloaders = [torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=True, num_workers=4, collate_fn=collate_fn) for test_dataset in test_datasets]
 
@@ -120,15 +140,36 @@ test_dataloaders = [torch.utils.data.DataLoader(test_dataset, batch_size=batch_s
 model = Detector(3, 256).to(device).bfloat16()
 classification_heads = [ConvBlock(256, len(train_dataset.classes), 1, 1).to(device) for train_dataset in train_datasets]
 
+print()
+print(f"model numel: {sum([param.numel() for param in model.parameters()])}")
+
+
 loss_fn = nn.CrossEntropyLoss()
-optimizer = optim.AdamW(model.parameters(), lr)
-head_optimizers = [optim.AdamW(head.parameters(), lr) for head in classification_heads]
+optimizer = optim.AdamW(model.parameters(), lr, betas=betas)
+head_optimizers = [optim.AdamW(head.parameters(), lr, betas=betas) for head in classification_heads]
+
+
+
+if load_checkpoint and os.path.exists(save_path):
+    state_dict = torch.load(save_path)
+    model.load_state_dict(state_dict["backbone"])
+    optimizer.load_state_dict(state_dict["backbone_optim"])
+    for i, head in enumerate(classification_heads):
+        head.load_state_dict(state_dict["heads"][i])
+    if "head_optims" in state_dict:
+        for i, head_optim in enumerate(head_optimizers):
+            head_optim.load_state_dict(state_dict["head_optims"][i])
+    print("loaded checkpoint")
+
+
+
 
 accuracy_history = []
 start_time = time.time()
 try:
     for epoch in range(epochs):
         train_loss = 0
+        total_examples = 0
         for dataset_batches in zip(*train_dataloaders):
             for (images, classes), head, head_optim in zip(dataset_batches, classification_heads, head_optimizers):
                 images = images.to(device, torch.bfloat16, non_blocking=True)
@@ -142,7 +183,8 @@ try:
                 mid = W//2, H//2
                 output = probs[:, :, *mid]
                 loss = loss_fn(output, classes)
-                train_loss += loss.item()
+                train_loss += loss.item()*B
+                total_examples += B
                 loss.backward()
                 head_optim.step()
                 head_optim.zero_grad()
@@ -164,17 +206,20 @@ try:
                     mid = W//2, H//2
                     output = probs[:, :, *mid]
                     loss = loss_fn(output, classes)
-                    test_loss += loss.item()
+                    test_loss += loss.item() * B
                     correct_predictions[i] += (output.argmax(1) == classes).float().sum().item()
                     total_predictions[i] += B
         test_loss /= sum(total_predictions)
-        train_loss /= total_train_size
+        train_loss /= total_examples
         correct_predictions = [correct/total for correct, total in zip(correct_predictions, total_predictions)]
+        for i, acc in enumerate(correct_predictions):
+            log_writer.add_scalar(f"accuracy/data{i}", acc, global_step=epoch)
         accuracy = np.mean(correct_predictions)
         accuracy_history.append(accuracy)
         # early stopping
         print(f"epoch: {epoch+1}/{epochs} \ttest loss: {test_loss:.3f} \ttrain loss: {train_loss:.3f}" \
-              f" \taccuracy: {[f'{correct_prediction:.3f}' for correct_prediction in correct_predictions]}{'\'' if accuracy_history[-1] == max(accuracy_history) else ' '}\tmean epoch time: {(time.time() - start_time)/(epoch+1):.2f}")
+                f" \taccuracy: ({', '.join([f'{correct_prediction:.3f}' for correct_prediction in correct_predictions])}){'\'' if accuracy_history.index(max(accuracy_history)) == len(accuracy_history)-1 else ' '}" \
+                f"\tmean epoch time: {(time.time() - start_time)/(epoch+1):.2f}")
         if accuracy_history.index(max(accuracy_history)) < len(accuracy_history) - early_stopping_patience:
             print("early stopping")
             break # stop training if accuray hasn't increased in the last 10 epochs
@@ -184,11 +229,15 @@ except KeyboardInterrupt:
         pass
     else:
         exit()
+except:
+    save_path = "model_backup.pt"
+
 state_dict = {
     "backbone" : model.state_dict(),
-    "heads" : [head.state_dict() for head in classification_heads],
     "backbone_optim" : optimizer.state_dict(),
+    "heads" : [head.state_dict() for head in classification_heads],
+    "head_optims" : [optim.state_dict() for optim in head_optimizers],
 }
-torch.save(model.state_dict(), "model.pt")
+torch.save(state_dict, save_path)
 print("model saved")
 
